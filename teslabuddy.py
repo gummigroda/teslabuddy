@@ -137,7 +137,9 @@ class TeslaBuddy:
         self.client = paho.mqtt.client.Client()
         self.client.on_connect = self.onmqttconnect
         self.client.on_message = self.onmqttmessage
-        self.client.connect(self.config.mqtt_host)
+        if self.config.mqtt_tls.lower() == "true":
+            self.client.tls_set()
+        self.client.connect(self.config.mqtt_host,self.config.mqtt_port)
         self.client.loop_start()
 
         # Thread to manage bundling GPS information into a single message
@@ -331,7 +333,11 @@ class TeslaBuddy:
             default=1883,
             type=int,
         )
-
+        parser.add_argument(
+            "--mqtt-tls",
+            help='if set to "true", will connect to the MQTT broker using TLS',
+        )
+        
         parser.add_argument(
             "--teslamate-url",
             help="base URL for TeslaMate, default is http://teslamate:4000/",
@@ -381,6 +387,8 @@ class TeslaBuddy:
             logging.getLogger().setLevel(logging.DEBUG)
         if args.debug is not True:
             args.debug = False
+
+        
         # log.debug("Processed command line arguments: %s", cmdlineargs)
         log.debug("Final arguments: %s", args)
         return args
