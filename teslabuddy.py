@@ -179,7 +179,9 @@ class TeslaBuddy:
             self.client.username_pw_set(self.config.mqtt_user, self.config.mqtt_pass)
 
         port = self.config.mqtt_port
-        if self.config.mqtt_tls and self.config.mqtt_tls.lower() == "true":
+        use_tls = bool(self.config.mqtt_tls and self.config.mqtt_tls.lower() == "true")
+
+        if use_tls:
             ca_certs = self.config.mqtt_tls_ca_cert or None
             certfile = self.config.mqtt_tls_cert or None
             keyfile = self.config.mqtt_tls_key or None
@@ -193,9 +195,9 @@ class TeslaBuddy:
                 and self.config.mqtt_tls_insecure.lower() == "true"
             ):
                 self.client.tls_insecure_set(True)
-            # Default to 8883 (mqtts) when TLS is enabled and port was not explicitly set
-            if port == 1883:
-                port = 8883
+
+        if port is None:
+            port = 8883 if use_tls else 1883
 
         self.client.connect(self.config.mqtt_host, port)
         self.client.loop_start()
