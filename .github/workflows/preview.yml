@@ -15,10 +15,14 @@ jobs:
   publish-preview:
     name: Publish preview image
     runs-on: ubuntu-latest
+    concurrency:
+      group: preview-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
     permissions:
       packages: write
-      contents: read
+      contents: read    
+    
     steps:
       - uses: actions/checkout@v7
 
