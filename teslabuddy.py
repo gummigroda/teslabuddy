@@ -49,7 +49,7 @@ ORIGIN = {
     "support_url": "https://github.com/gummigroda/teslabuddy",
 }
 
-GPS_TOPICS = {"elevation", "location", "geofence", "speed", "heading"}
+GPS_TOPICS = {"elevation", "location", "longitude", "geofence", "latitude", "speed", "heading"}
 MAP_THROUGH_TOPICS = {
     "battery_level",
     "charge_current_request",
