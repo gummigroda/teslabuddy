@@ -118,7 +118,7 @@ secrets:
 
 
 
-An important component of a Home Assistant Device Tracker (I have figured out from trial and error as the docs don't cover this), is the `state` component should always be either `home` or `not_home`. To configure the `home` location, in TeslaMate create a Geo-Fence (configured via the web interface), and name it "Home". When the vehicle enters this area, it will set the state attribute to `home`. If not set, the vehicle will _always_ be not home. Home Assistant does **not** use it's configured home location to set this for device trackers via MQTT (I'm not sure about other devices).
+Home Assistant does **not** use its configured home location to set this for device trackers via MQTT (I'm not sure about other devices).
 
 # ToDo
 
