@@ -22,51 +22,40 @@ All work starts from `main` and is merged back via a Pull Request.
 3. # … make changes, commit …
 4. git push origin feature/my-thing
 5. Open a Pull Request on GitHub
-6. CI runs automatically — fix any lint/build errors
-7. Merge PR into main once CI is green
+6. Preview image is built and published automatically
+7. Merge PR into main once ready
 ```
-
----
-
-## Automated CI (every push and PR)
-
-The **CI** workflow (`.github/workflows/ci.yml`) runs on every push and on every
-pull request, regardless of branch. It performs two checks:
-
-| Check | What it does |
-|-------|-------------|
-| **Lint** | Runs `ruff check .` and `python -m py_compile` to catch errors early |
-| **Docker build** | Builds the Docker image without pushing to verify the `Dockerfile` is valid |
-
-> Both checks must be green before a PR can be merged.
 
 ---
 
 ## Preview Images
 
-Pushing to a `feature/**` or `fix/**` branch automatically triggers the
-**Preview Image** workflow (`.github/workflows/preview.yml`).
+Opening or updating a Pull Request automatically triggers the **Preview Image**
+workflow (`.github/workflows/preview.yml`).
 
 It builds a multi-arch image (`linux/amd64` + `linux/arm64`) and publishes it to
-the GitHub Container Registry:
+the GitHub Container Registry with two tags — a unique one per PR and a floating
+`latest-preview` that always points to the most recently updated PR:
 
 ```
-ghcr.io/gummigroda/teslabuddy:preview-<branch>-<short-sha>
+ghcr.io/gummigroda/teslabuddy:preview-<branch>-<pr-number>
+ghcr.io/gummigroda/teslabuddy:latest-preview
 ```
 
-**Example** — after pushing `feature/add-horn-support` with SHA `a1b2c3d`:
+**Example** — PR #42 from `feature/add-horn-support`:
+
 ```
-ghcr.io/gummigroda/teslabuddy:preview-feature-add-horn-support-a1b2c3d
+ghcr.io/gummigroda/teslabuddy:preview-feature-add-horn-support-42
+ghcr.io/gummigroda/teslabuddy:latest-preview
 ```
 
-You can pull and run this image to test your changes in a real environment before
-the PR is merged:
+The image is updated automatically on every subsequent push to the same PR. You
+can pull and run it to test your changes in a real environment before merging:
 
 ```yaml
-# docker-compose snippet for testing a preview image
+# docker-compose snippet — pin to the specific PR image
   teslabuddy:
-    image: ghcr.io/gummigroda/teslabuddy:preview-feature-add-horn-support-a1b2c3d
-    ...
+    image: ghcr.io/gummigroda/teslabuddy:preview-feature-add-horn-support-42
 ```
 
 > Preview images are not cleaned up automatically. Delete old ones manually from
@@ -86,9 +75,10 @@ Releases follow [Semantic Versioning](https://semver.org/) (`vMAJOR.MINOR.PATCH`
 
 ### Steps
 
-1. Ensure `main` is in the desired state (all PRs merged, CI green).
+1. Ensure `main` is in the desired state (all PRs merged).
 
 2. Create and push an annotated tag:
+
    ```bash
    git checkout main && git pull
    git tag -a v1.2.3 -m "Release v1.2.3"
@@ -153,6 +143,7 @@ docker run --rm \
 ### Using Docker Secrets locally
 
 For local testing, you can simulate Docker secrets by mounting files:
+
 ```bash
 echo "mysecretpassword" > /tmp/mqtt_pass
 docker run --rm \
