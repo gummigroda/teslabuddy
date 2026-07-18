@@ -319,7 +319,7 @@ class TeslaBuddy:
                 else:
                     current_state["state"] = "not_home"
 
-            elif topic in ("elevation", "speed", "heading"):
+            elif topic in ("elevation", "longitude", "latitude", "speed", "heading"):
                 current_state[topic] = forcefloat(value)
 
             timeout = QUEUE_TIMEOUT
