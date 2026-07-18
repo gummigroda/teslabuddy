@@ -1,8 +1,8 @@
 FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
-	&& apt-get upgrade -y \
-	&& rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --upgrade pip --no-cache-dir
 
