@@ -250,7 +250,8 @@ class TeslaBuddy:
             self.pubifchanged(topic, value)
 
         elif topic in BOOLEAN_TOPICS:
-            self.pubifchanged(topic, "ON" if value == "true" else "OFF")
+            normalized = str(value).strip().lower()
+            self.pubifchanged(topic, "ON" if normalized == "true" else "OFF")
 
         elif topic == "shift_state":
             if not value:
