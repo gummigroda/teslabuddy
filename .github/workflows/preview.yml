@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Sanities branch name for use as Docker tag
+      - name: Sanitizes branch name for use as Docker tag
         id: branch
         run: |
           SAFE=$(echo "${{ github.head_ref }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
