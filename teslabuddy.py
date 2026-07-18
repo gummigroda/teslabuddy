@@ -396,7 +396,7 @@ class TeslaBuddy:
         parser.add_argument(
             "--mqtt-port",
             help="MQTT broker port (defaults to 8883 when --mqtt-tls is true, otherwise 1883)",
-            default=1883,
+            default=None,
             type=int,
         )
         parser.add_argument(
