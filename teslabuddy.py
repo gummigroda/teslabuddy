@@ -43,21 +43,56 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-GPS_TOPICS = {"elevation", "longitude", "geofence", "latitude", "speed", "heading"}
+# Included in every HA discovery message to identify this integration
+ORIGIN = {
+    "name": "teslabuddy",
+    "support_url": "https://github.com/gummigroda/teslabuddy",
+}
+
+GPS_TOPICS = {"elevation", "location", "geofence", "speed", "heading"}
 MAP_THROUGH_TOPICS = {
     "battery_level",
+    "charge_current_request",
+    "charge_current_request_max",
+    "charge_energy_added",
     "charge_limit_soc",
     "charger_actual_current",
+    "charger_phases",
     "charger_power",
     "charger_voltage",
+    "charging_state",
+    "climate_keeper_mode",
     "est_battery_range_km",
     "ideal_battery_range_km",
     "inside_temp",
     "odometer",
     "outside_temp",
     "rated_battery_range_km",
+    "scheduled_charging_start_time",
     "state",
     "time_to_full_charge",
+    "tpms_pressure_fl",
+    "tpms_pressure_fr",
+    "tpms_pressure_rl",
+    "tpms_pressure_rr",
+    "usable_battery_level",
+    "version",
+}
+# Topics that TeslaMate publishes as "true"/"false" strings mapped to ON/OFF for HA
+BOOLEAN_TOPICS = {
+    "charge_port_door_open",
+    "doors_open",
+    "is_climate_on",
+    "is_preconditioning",
+    "locked",
+    "plugged_in",
+    "sentry_mode",
+    "tpms_soft_warning_fl",
+    "tpms_soft_warning_fr",
+    "tpms_soft_warning_rl",
+    "tpms_soft_warning_rr",
+    "update_available",
+    "windows_open",
 }
 
 
@@ -134,10 +169,35 @@ class TeslaBuddy:
         return conn
 
     def start(self):
-        self.client = paho.mqtt.client.Client()
+        self.client = paho.mqtt.client.Client(
+            callback_api_version=paho.mqtt.client.CallbackAPIVersion.VERSION1
+        )
         self.client.on_connect = self.onmqttconnect
         self.client.on_message = self.onmqttmessage
-        self.client.connect(self.config.mqtt_host)
+
+        if self.config.mqtt_user:
+            self.client.username_pw_set(self.config.mqtt_user, self.config.mqtt_pass)
+
+        port = self.config.mqtt_port
+        if self.config.mqtt_tls and self.config.mqtt_tls.lower() == "true":
+            ca_certs = self.config.mqtt_tls_ca_cert or None
+            certfile = self.config.mqtt_tls_cert or None
+            keyfile = self.config.mqtt_tls_key or None
+            self.client.tls_set(
+                ca_certs=ca_certs,
+                certfile=certfile,
+                keyfile=keyfile,
+            )
+            if (
+                self.config.mqtt_tls_insecure
+                and self.config.mqtt_tls_insecure.lower() == "true"
+            ):
+                self.client.tls_insecure_set(True)
+            # Default to 8883 (mqtts) when TLS is enabled and port was not explicitly set
+            if port == 1883:
+                port = 8883
+
+        self.client.connect(self.config.mqtt_host, port)
         self.client.loop_start()
 
         # Thread to manage bundling GPS information into a single message
@@ -189,12 +249,8 @@ class TeslaBuddy:
         elif topic in MAP_THROUGH_TOPICS:
             self.pubifchanged(topic, value)
 
-        elif topic == "plugged_in":
-            if value == "true":
-                value = "ON"
-            else:
-                value = "OFF"
-            self.pubifchanged(topic, value)
+        elif topic in BOOLEAN_TOPICS:
+            self.pubifchanged(topic, "ON" if value == "true" else "OFF")
 
         elif topic == "shift_state":
             if not value:
@@ -244,14 +300,23 @@ class TeslaBuddy:
                 self.pubifchanged("gps", json.dumps(current_state))
                 continue
 
-            if topic == "geofence":
+            if topic == "location":
+                # TeslaMate combines lat/lon in a single JSON topic (deprecated separate topics removed)
+                try:
+                    loc = json.loads(value)
+                    current_state["latitude"] = forcefloat(loc.get("latitude"))
+                    current_state["longitude"] = forcefloat(loc.get("longitude"))
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    log.warning("Failed to parse location JSON: %r", value)
+
+            elif topic == "geofence":
                 current_state["geofence"] = value
                 if value.lower() == "home":
                     current_state["state"] = "home"
                 else:
                     current_state["state"] = "not_home"
 
-            if topic in ("elevation", "longitude", "latitude", "speed", "heading"):
+            elif topic in ("elevation", "speed", "heading"):
                 current_state[topic] = forcefloat(value)
 
             timeout = QUEUE_TIMEOUT
@@ -327,9 +392,37 @@ class TeslaBuddy:
         )
         parser.add_argument(
             "--mqtt-port",
-            help="MQTT broker port",
+            help="MQTT broker port (defaults to 8883 when --mqtt-tls is true, otherwise 1883)",
             default=1883,
             type=int,
+        )
+        parser.add_argument(
+            "--mqtt-user",
+            help="MQTT broker username",
+        )
+        parser.add_argument(
+            "--mqtt-pass",
+            help="MQTT broker password",
+        )
+        parser.add_argument(
+            "--mqtt-tls",
+            help='if set to "true", enable TLS for the MQTT connection (mqtts)',
+        )
+        parser.add_argument(
+            "--mqtt-tls-ca-cert",
+            help="path to CA certificate file for MQTT TLS verification",
+        )
+        parser.add_argument(
+            "--mqtt-tls-cert",
+            help="path to client certificate file for mutual TLS authentication",
+        )
+        parser.add_argument(
+            "--mqtt-tls-key",
+            help="path to client private key file for mutual TLS authentication",
+        )
+        parser.add_argument(
+            "--mqtt-tls-insecure",
+            help='if set to "true", disable TLS certificate verification (not recommended)',
         )
 
         parser.add_argument(
@@ -363,16 +456,34 @@ class TeslaBuddy:
             help='if set to "true", will include debug level logging',
         )
 
-        # Get the OS environnement arguments
+        # Get the OS environnement arguments, with Docker secret support:
+        # If FOO_FILE=/run/secrets/foo is set (and FOO is not set directly),
+        # the contents of that file are used as the value for FOO.
+        secret_overrides = {}
+        for key, path in os.environ.items():
+            if key.endswith("_FILE") and path:
+                base_key = key[:-5]
+                if base_key not in os.environ:
+                    try:
+                        with open(path) as f:
+                            secret_overrides[base_key] = f.read().strip()
+                        log.debug("Loaded secret for %s from %s", base_key, path)
+                    except OSError as e:
+                        log.warning(
+                            "Could not read secret file for %s (%s): %s",
+                            base_key, path, e,
+                        )
+
         cmdlineargs = sys.argv.copy()[1:]
-        for arg, val in os.environ.items():
-            arg = arg.lower()
-            arg = arg.replace("_", "-")
+        merged_env = {**os.environ, **secret_overrides}
+        for arg, val in merged_env.items():
+            if arg.endswith("_FILE"):
+                continue  # skip the _FILE pointer itself
+            arg = arg.lower().replace("_", "-")
             if val:
-                arg = f"--{arg}={val}"
+                cmdlineargs.append(f"--{arg}={val}")
             else:
-                arg = f"--{arg}"
-            cmdlineargs.append(arg)
+                cmdlineargs.append(f"--{arg}")
 
         args = parser.parse_known_args(cmdlineargs)[0]
         if args.debug:
@@ -500,141 +611,165 @@ class TeslaBuddy:
             self._pubstate[item] = value
 
     def homeassistantsetup(self):
-        "Publish config for Home Assistant"
-        STANDARD_TOPICS = [
-            # [topic, hass type, description, unit of measurement, class, icon]
-            [
-                "state",
-                "sensor",
-                "State",
-                None,
-                None,
-                "mdi:gauge",
-            ],
-            [
-                "shift_state",
-                "sensor",
-                "Shift State",
-                None,
-                None,
-                None,
-            ],
-            [
-                "outside_temp",
-                "sensor",
-                "Outside Temperature",
-                "°" + self.teslamatesettings.unit_of_temperature,
-                "temperature",
-                None,
-            ],
-            [
-                "inside_temp",
-                "sensor",
-                "Inside Temperature",
-                "°" + self.teslamatesettings.unit_of_temperature,
-                "temperature",
-                None,
-            ],
-            [
-                "time_to_full_charge",
-                "sensor",
-                "Time to Full",
-                "h",
-                None,
-                "hass:clock-fast",
-            ],
-            [
-                "odometer",
-                "sensor",
-                "Odometer",
-                self.teslamatesettings.unit_of_length,
-                None,
-                "mdi:counter",
-            ],
-            [
-                "charger_power",
-                "sensor",
-                "Charger Power",
-                "kW",
-                "power",
-                None,
-            ],
-            [
-                "charger_voltage",
-                "sensor",
-                "Charger Voltage",
-                "V",
-                "voltage",
-                None,
-            ],
-            [
-                "charger_actual_current",
-                "sensor",
-                "Charger Current",
-                "A",
-                "current",
-                None,
-            ],
-            [
-                "ideal_battery_range_km",
-                "sensor",
-                "Ideal Battery Range",
-                "km",
-                None,
-                None,
-            ],
-            [
-                "est_battery_range_km",
-                "sensor",
-                "Estimated Battery Range",
-                "km",
-                None,
-                None,
-            ],
-            [
-                "plugged_in",
-                "binary_sensor",
-                "Plugged In",
-                None,
-                None,
-                None,
-            ],
+        "Publish config for Home Assistant MQTT auto-discovery"
+        temp_unit = "°" + self.teslamatesettings.unit_of_temperature
+        length_unit = self.teslamatesettings.unit_of_length
+
+        # Device blocks — HA requires at least identifiers + name.
+        # device_full is used for the first entity to register full device metadata;
+        # device_ref is used for all subsequent entities (HA deduplicates by identifiers).
+        device_full = {
+            "identifiers": [f"{self.vin}_device"],
+            "name": f"{self.carname} Vehicle",
+            "manufacturer": "Tesla",
+            "model": self.carmodeltxt,
+            "serial_number": self.vin,
+        }
+        device_ref = {
+            "identifiers": [f"{self.vin}_device"],
+            "name": f"{self.carname} Vehicle",
+        }
+
+        # Entities. Names omit the car name — HA automatically prepends the device name.
+        # Format keys: topic, type, name, uom, device_class, icon, state_class, entity_category
+        ENTITIES = [
+            # --- State & Info ---
+            {"topic": "state", "type": "sensor", "name": "State",
+             "icon": "mdi:gauge"},
+            {"topic": "shift_state", "type": "sensor", "name": "Shift State"},
+            {"topic": "charging_state", "type": "sensor", "name": "Charging State",
+             "icon": "mdi:ev-station"},
+            {"topic": "version", "type": "sensor", "name": "Software Version",
+             "entity_category": "diagnostic"},
+            {"topic": "climate_keeper_mode", "type": "sensor", "name": "Climate Mode",
+             "icon": "mdi:fan"},
+            {"topic": "scheduled_charging_start_time", "type": "sensor",
+             "name": "Scheduled Charge Time", "icon": "mdi:clock-outline"},
+            # --- Temperature ---
+            {"topic": "outside_temp", "type": "sensor", "name": "Outside Temperature",
+             "uom": temp_unit, "device_class": "temperature",
+             "state_class": "measurement"},
+            {"topic": "inside_temp", "type": "sensor", "name": "Inside Temperature",
+             "uom": temp_unit, "device_class": "temperature",
+             "state_class": "measurement"},
+            # --- Battery & Range ---
+            {"topic": "usable_battery_level", "type": "sensor",
+             "name": "Usable Battery Level", "uom": "%", "device_class": "battery",
+             "state_class": "measurement"},
+            {"topic": "odometer", "type": "sensor", "name": "Odometer",
+             "uom": length_unit, "icon": "mdi:counter",
+             "state_class": "total_increasing"},
+            {"topic": "est_battery_range_km", "type": "sensor",
+             "name": "Estimated Range", "uom": "km",
+             "icon": "mdi:map-marker-distance"},
+            {"topic": "rated_battery_range_km", "type": "sensor",
+             "name": "Rated Range", "uom": "km",
+             "icon": "mdi:map-marker-distance"},
+            {"topic": "ideal_battery_range_km", "type": "sensor",
+             "name": "Ideal Range", "uom": "km",
+             "icon": "mdi:map-marker-distance"},
+            # --- Charging ---
+            {"topic": "time_to_full_charge", "type": "sensor",
+             "name": "Time to Full Charge", "uom": "h", "device_class": "duration",
+             "icon": "mdi:clock-fast"},
+            {"topic": "charge_energy_added", "type": "sensor", "name": "Energy Added",
+             "uom": "kWh", "device_class": "energy",
+             "state_class": "total_increasing"},
+            {"topic": "charger_power", "type": "sensor", "name": "Charger Power",
+             "uom": "kW", "device_class": "power", "state_class": "measurement"},
+            {"topic": "charger_voltage", "type": "sensor", "name": "Charger Voltage",
+             "uom": "V", "device_class": "voltage", "state_class": "measurement"},
+            {"topic": "charger_actual_current", "type": "sensor",
+             "name": "Charger Current", "uom": "A", "device_class": "current",
+             "state_class": "measurement"},
+            {"topic": "charger_phases", "type": "sensor", "name": "Charger Phases",
+             "icon": "mdi:sine-wave"},
+            {"topic": "charge_current_request", "type": "sensor",
+             "name": "Charge Current Request", "uom": "A", "device_class": "current",
+             "state_class": "measurement"},
+            {"topic": "charge_current_request_max", "type": "sensor",
+             "name": "Max Charge Current", "uom": "A", "device_class": "current",
+             "state_class": "measurement"},
+            # --- TPMS ---
+            {"topic": "tpms_pressure_fl", "type": "sensor",
+             "name": "Tire Pressure FL", "uom": "bar", "device_class": "pressure",
+             "state_class": "measurement"},
+            {"topic": "tpms_pressure_fr", "type": "sensor",
+             "name": "Tire Pressure FR", "uom": "bar", "device_class": "pressure",
+             "state_class": "measurement"},
+            {"topic": "tpms_pressure_rl", "type": "sensor",
+             "name": "Tire Pressure RL", "uom": "bar", "device_class": "pressure",
+             "state_class": "measurement"},
+            {"topic": "tpms_pressure_rr", "type": "sensor",
+             "name": "Tire Pressure RR", "uom": "bar", "device_class": "pressure",
+             "state_class": "measurement"},
+            # --- Binary Sensors ---
+            {"topic": "plugged_in", "type": "binary_sensor", "name": "Plugged In",
+             "device_class": "plug"},
+            {"topic": "locked", "type": "binary_sensor", "name": "Locked",
+             "device_class": "lock"},
+            {"topic": "sentry_mode", "type": "binary_sensor", "name": "Sentry Mode",
+             "icon": "mdi:shield-car"},
+            {"topic": "windows_open", "type": "binary_sensor", "name": "Windows",
+             "device_class": "window"},
+            {"topic": "doors_open", "type": "binary_sensor", "name": "Doors",
+             "device_class": "door"},
+            {"topic": "charge_port_door_open", "type": "binary_sensor",
+             "name": "Charge Port Door", "device_class": "door"},
+            {"topic": "is_climate_on", "type": "binary_sensor", "name": "Climate",
+             "device_class": "running"},
+            {"topic": "is_preconditioning", "type": "binary_sensor",
+             "name": "Preconditioning", "device_class": "heat"},
+            {"topic": "update_available", "type": "binary_sensor",
+             "name": "Update Available", "device_class": "update"},
+            {"topic": "tpms_soft_warning_fl", "type": "binary_sensor",
+             "name": "Tire Warning FL", "device_class": "problem"},
+            {"topic": "tpms_soft_warning_fr", "type": "binary_sensor",
+             "name": "Tire Warning FR", "device_class": "problem"},
+            {"topic": "tpms_soft_warning_rl", "type": "binary_sensor",
+             "name": "Tire Warning RL", "device_class": "problem"},
+            {"topic": "tpms_soft_warning_rr", "type": "binary_sensor",
+             "name": "Tire Warning RR", "device_class": "problem"},
         ]
 
-        # Special case to handle the device element
+        # Battery level is published first to register the full device block in HA
         self.mqtt_publish(
-            f"homeassistant/sensor/{self.vin}/battery/config",
+            f"homeassistant/sensor/{self.vin}/battery_level/config",
             json.dumps(
                 {
-                    "name": f"{self.carname} Battery Level",
+                    "name": "Battery Level",
                     "state_topic": f"{self.basetopic}/battery_level",
                     "unique_id": f"{self.vin}_battery_level",
                     "unit_of_measurement": "%",
                     "device_class": "battery",
-                    "device": {
-                        "identifiers": [f"{self.vin}_device"],
-                        "name": f"{self.carname} Vehicle",
-                        "manufacturer": "Tesla",
-                        "model": self.carmodeltxt,
-                    },
+                    "state_class": "measurement",
+                    "device": device_full,
+                    "origin": ORIGIN,
                 }
             ),
             retain=True,
         )
 
-        for topic, hasstype, description, uom, devclass, icon in STANDARD_TOPICS:
+        for entry in ENTITIES:
+            topic = entry["topic"]
+            hasstype = entry["type"]
             data = {
-                "name": f"{self.carname} {description}",
+                "name": entry["name"],
                 "state_topic": f"{self.basetopic}/{topic}",
                 "unique_id": f"{self.vin}_{topic}",
-                "device": {"identifiers": [f"{self.vin}_device"]},
+                "device": device_ref,
+                "origin": ORIGIN,
             }
-            if uom:
-                data["unit_of_measurement"] = uom
-            if devclass:
-                data["device_class"] = devclass
-            if icon:
-                data["icon"] = icon
+            if entry.get("uom"):
+                data["unit_of_measurement"] = entry["uom"]
+            if entry.get("device_class"):
+                data["device_class"] = entry["device_class"]
+            if entry.get("icon"):
+                data["icon"] = entry["icon"]
+            if entry.get("state_class"):
+                data["state_class"] = entry["state_class"]
+            if entry.get("entity_category"):
+                data["entity_category"] = entry["entity_category"]
 
             self.mqtt_publish(
                 f"homeassistant/{hasstype}/{self.vin}/{topic}/config",
@@ -642,52 +777,56 @@ class TeslaBuddy:
                 retain=True,
             )
 
-        # Charge limit, including setting
+        # Charge limit — number entity with get/set
         self.mqtt_publish(
             f"homeassistant/number/{self.vin}/charge_limit_soc/config",
             json.dumps(
                 {
-                    "name": f"{self.carname} Charge Limit",
+                    "name": "Charge Limit",
                     "state_topic": f"{self.basetopic}/charge_limit_soc",
                     "command_topic": f"{self.basetopic}/charge_limit_soc/set",
                     "unique_id": f"{self.vin}_charge_limit_soc",
                     "min": 50,
                     "max": 100,
-                    "device": {"identifiers": [f"{self.vin}_device"]},
-                    "icon": "hass:battery-alert",
+                    "device": device_ref,
+                    "icon": "mdi:battery-alert",
+                    "origin": ORIGIN,
                 }
             ),
             retain=True,
         )
 
-        # Charging action, including setting/turning on/off
+        # Charging switch — start/stop charging
         self.mqtt_publish(
             f"homeassistant/switch/{self.vin}/charging/config",
             json.dumps(
                 {
-                    "name": f"{self.carname} Charging",
+                    "name": "Charging",
                     "state_topic": f"{self.basetopic}/charging",
                     "command_topic": f"{self.basetopic}/charging/set",
                     "unique_id": f"{self.vin}_charging",
-                    "device": {"identifiers": [f"{self.vin}_device"]},
-                    "icon": "hass:battery-alert",  # XXX better icon?
+                    "device": device_ref,
+                    "icon": "mdi:battery-charging",
+                    "origin": ORIGIN,
                 }
             ),
             retain=True,
         )
 
+        # Device tracker — GPS location
         self.mqtt_publish(
             f"homeassistant/device_tracker/{self.vin}/gps/config",
             json.dumps(
                 {
-                    "name": f"{self.carname} Location",
+                    "name": "Location",
                     "json_attributes_topic": f"{self.basetopic}/gps",
                     "state_topic": f"{self.basetopic}/gps",
                     "value_template": "{{value_json.state}}",
                     "unique_id": f"{self.vin}_gps",
-                    "device": {"identifiers": [f"{self.vin}_device"]},
+                    "device": device_ref,
                     "source_type": "gps",
                     "icon": "mdi:crosshairs-gps",
+                    "origin": ORIGIN,
                 }
             ),
             retain=True,

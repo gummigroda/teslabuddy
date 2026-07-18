@@ -41,6 +41,11 @@ This is a snippet from a `docker-compose.yml` file, this would typically be alon
       - DATABASE_NAME=teslamate
       - DATABASE_HOST=postgres
       - MQTT_HOST=mqtt
+      # - MQTT_USER=myuser
+      # - MQTT_PASS=mypassword
+      # - MQTT_TLS=true
+      # - MQTT_TLS_CA_CERT=/certs/ca.crt
+      # - MQTT_TLS_INSECURE=true   # skip cert verification (not recommended)
       # - DEBUG=true
     volumes:
       - "/etc/localtime:/etc/localtime:ro"
@@ -58,19 +63,66 @@ If your TeslaMate configuration also has several vehicles associated with it, yo
       - VIN=5Y123456789123456
 ```
 
-### Home Assistant "Device Tracker"
+### MQTT TLS (mqtts)
+
+To connect to a Mosquitto broker using TLS, set the following environment variables:
+
+```
+  teslabuddy:
+    ...
+    environment:
+      - MQTT_HOST=mqtt.my.domain
+      - MQTT_TLS=true
+      # Port defaults to 8883 when TLS is enabled; override with MQTT_PORT if needed
+      # - MQTT_PORT=8883
+
+      # MQTT authentication (recommended with TLS)
+      - MQTT_USER=myuser
+      - MQTT_PASS=mypassword
+
+      # Provide your CA cert if using a self-signed certificate:
+      # - MQTT_TLS_CA_CERT=/certs/ca.crt
+
+      # For mutual TLS (client certificates):
+      # - MQTT_TLS_CERT=/certs/client.crt
+      # - MQTT_TLS_KEY=/certs/client.key
+
+      # Skip certificate verification (not recommended for production):
+      # - MQTT_TLS_INSECURE=true
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      # Mount certs if using MQTT_TLS_CA_CERT / MQTT_TLS_CERT / MQTT_TLS_KEY:
+      # - "/path/to/certs:/certs:ro"
+```
+
+### Docker Secrets
+
+Sensitive values (passwords) can be provided via [Docker Secrets](https://docs.docker.com/engine/swarm/secrets/) using the standard `_FILE` suffix convention. If `FOO_FILE` is set to a file path and `FOO` is **not** set, the file contents are used as the value for `FOO`. This works for any configuration option:
+
+```yaml
+  teslabuddy:
+    ...
+    environment:
+      - DATABASE_PASS_FILE=/run/secrets/teslamate_db_password
+      - MQTT_PASS_FILE=/run/secrets/mqtt_password
+    secrets:
+      - teslamate_db_password
+      - mqtt_password
+
+secrets:
+  teslamate_db_password:
+    external: true
+  mqtt_password:
+    external: true
+```
+
+
 
 An important component of a Home Assistant Device Tracker (I have figured out from trial and error as the docs don't cover this), is the `state` component should always be either `home` or `not_home`. To configure the `home` location, in TeslaMate create a Geo-Fence (configured via the web interface), and name it "Home". When the vehicle enters this area, it will set the state attribute to `home`. If not set, the vehicle will _always_ be not home. Home Assistant does **not** use it's configured home location to set this for device trackers via MQTT (I'm not sure about other devices).
 
 # ToDo
 
-Currently this only supports charging actions, and is very much focused on that. However if you are interested in supporting more actions, please raise an issue and I can include it. I will likely add further controls about what options are exposed via MQTT if going down this path.
-
-Additionally, not all items from TeslaMate are surfaced in Home Assistant, please raise an issue if you want more to come through as well.
-
-Finally, the configuration is fairly limited, so if something is not supported that you need (eg: MQTT over TLS), please also raise an issue.
-
-If this becomes at all popular, I'll also look to deploy it to Docker Hub (so you don't have to build it yourself).
+Currently this only supports charging actions. If you are interested in supporting more actions, please raise an issue.
 
 # Implementation Notes
 
