@@ -6,7 +6,7 @@ TeslaMate: https://github.com/adriankumpf/teslamate
 Home Assistant: https://www.home-assistant.io/
 
 Configuration can be given via the OS environment (or via the command line), by
-converting the command line long option to uppercase, and replacing "-" with "_", 
+converting the command line long option to uppercase, and replacing "-" with "_",
 for example, the "--database-host" option would be:
 
 DATABASE_HOST=postgres.local
@@ -836,7 +836,7 @@ class TeslaBuddy:
 def forcefloat(v):
     try:
         return float(v)
-    except:
+    except (ValueError, TypeError):
         return 0
 
 
