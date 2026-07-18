@@ -464,8 +464,7 @@ class TeslaBuddy:
         for key, path in os.environ.items():
             if key.endswith("_FILE") and path:
                 base_key = key[:-5]
-                if base_key not in os.environ:
-                    try:
+                if not os.environ.get(base_key):
                         with open(path) as f:
                             secret_overrides[base_key] = f.read().strip()
                         log.debug("Loaded secret for %s from %s", base_key, path)
