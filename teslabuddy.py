@@ -666,13 +666,14 @@ class TeslaBuddy:
             "name": f"{self.carname} Vehicle",
         }
 
-        # Added to every entity so HA marks them unavailable if teslabuddy stops
-        availability = {
-            "availability_topic": self.availabilitytopic,
-            "payload_available": "online",
-            "payload_not_available": "offline",
-        }
         teslamatetopic = f"teslamate/cars/{self.tmid}"
+
+        # HA marks entities unavailable when TeslaMate reports the car unhealthy
+        availability = {
+            "availability_topic": f"{teslamatetopic}/healthy",
+            "payload_available": "true",
+            "payload_not_available": "false",
+        }
 
         # Entities. Names omit the car name — HA automatically prepends the device name.
         # Format keys: topic, type, name, uom, device_class, icon, state_class, entity_category
@@ -818,7 +819,6 @@ class TeslaBuddy:
                 data["entity_category"] = entry["entity_category"]
 
             if hasstype == "binary_sensor":
-                data["value_template"] = "{{ value_json }}"
                 data["payload_on"] = True
                 data["payload_off"] = False
             elif hasstype == "switch":
