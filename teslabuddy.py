@@ -282,7 +282,10 @@ class TeslaBuddy:
             self._mqttconnected = False
             reason_name = getattr(reason_code, "name", str(reason_code))
             reason_value = getattr(reason_code, "value", reason_code)
-            error_text = client.error_string(reason_value)
+            try:
+                error_text = paho.mqtt.client.error_string(reason_value)
+            except AttributeError:
+                error_text = str(reason_code)
             log.error(
                 "MQTT connection failed: %s (%s) - %s",
                 reason_name,
