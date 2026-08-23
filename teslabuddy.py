@@ -601,7 +601,7 @@ class TeslaBuddy:
         parser.add_argument(
             "--base-topic",
             help="base MQTT topic for pub/sub messages, no trailing /",
-            default="tesla/car",
+            default="teslabuddy",
         )
 
         parser.add_argument(
@@ -818,6 +818,7 @@ class TeslaBuddy:
             "payload_available": "online",
             "payload_not_available": "offline",
         }
+        teslamatetopic = f"teslamate/cars/{self.tmid}"
 
         # Entities. Names omit the car name — HA automatically prepends the device name.
         # Format keys: topic, type, name, uom, device_class, icon, state_class, entity_category
@@ -927,7 +928,7 @@ class TeslaBuddy:
             json.dumps(
                 {
                     "name": "Battery Level",
-                    "state_topic": f"{self.basetopic}/battery_level",
+                    "state_topic": f"{teslamatetopic}/battery_level",
                     "unique_id": f"{self.vin}_battery_level",
                     "unit_of_measurement": "%",
                     "device_class": "battery",
@@ -945,7 +946,7 @@ class TeslaBuddy:
             hasstype = entry["type"]
             data = {
                 "name": entry["name"],
-                "state_topic": f"{self.basetopic}/{topic}",
+                "state_topic": f"{teslamatetopic}/{topic}",
                 "unique_id": f"{self.vin}_{topic}",
                 "device": device_ref,
                 "origin": ORIGIN,
@@ -974,7 +975,7 @@ class TeslaBuddy:
             json.dumps(
                 {
                     "name": "Charge Limit",
-                    "state_topic": f"{self.basetopic}/charge_limit_soc",
+                    "state_topic": f"{teslamatetopic}/charge_limit_soc",
                     "command_topic": f"{self.basetopic}/charge_limit_soc/set",
                     "unique_id": f"{self.vin}_charge_limit_soc",
                     "min": 50,
@@ -994,7 +995,7 @@ class TeslaBuddy:
             json.dumps(
                 {
                     "name": "Charging",
-                    "state_topic": f"{self.basetopic}/charging",
+                    "state_topic": f"{teslamatetopic}/charging",
                     "command_topic": f"{self.basetopic}/charging/set",
                     "unique_id": f"{self.vin}_charging",
                     "device": device_ref,
