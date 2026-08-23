@@ -818,6 +818,7 @@ class TeslaBuddy:
                 data["entity_category"] = entry["entity_category"]
 
             if hasstype == "binary_sensor":
+                data["value_template"] = "{{ value_json }}"
                 data["payload_on"] = True
                 data["payload_off"] = False
             elif hasstype == "switch":
