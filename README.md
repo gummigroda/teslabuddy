@@ -46,6 +46,8 @@ This is a snippet from a `docker-compose.yml` file, this would typically be alon
       # - MQTT_TLS=true
       # - MQTT_TLS_CA_CERT=/certs/ca.crt
       # - MQTT_TLS_INSECURE=true   # skip cert verification (not recommended)
+      # - STATUS_TOPIC=teslabuddy  # base topic for status/statistics messages
+      # - STATUS_INTERVAL=300      # seconds between status updates, 0 disables
       # - DEBUG=true
     volumes:
       - "/etc/localtime:/etc/localtime:ro"
@@ -94,6 +96,34 @@ To connect to a Mosquitto broker using TLS, set the following environment variab
       # Mount certs if using MQTT_TLS_CA_CERT / MQTT_TLS_CERT / MQTT_TLS_KEY:
       # - "/path/to/certs:/certs:ro"
 ```
+
+### Status and health monitoring
+
+teslabuddy publishes its own state to MQTT, under `STATUS_TOPIC` (default `teslabuddy`), per VIN:
+
+- `teslabuddy/<VIN>/availability` — `online` / `offline` (retained, `offline` is set as the MQTT last will, so it is published by the broker if teslabuddy dies). All Home Assistant entities use this as their availability topic.
+- `teslabuddy/<VIN>/status` — retained JSON published at startup and every `STATUS_INTERVAL` seconds (default 300, set to `0` to disable):
+
+```json
+{
+  "state": "online",
+  "vin": "5Y123456789123456",
+  "car_name": "Tessie",
+  "teslamate_car_id": 1,
+  "started": 1740000000,
+  "uptime_seconds": 3720,
+  "uptime": "1h 2m",
+  "teslamate_messages": 1043,
+  "last_teslamate_message_seconds": 4,
+  "messages_published": 512,
+  "tesla_api_commands": 3,
+  "timestamp": 1740003720
+}
+```
+
+The same summary is written to the container log, and it is exposed in Home Assistant as a diagnostic "TeslaBuddy Uptime" sensor with the JSON fields as attributes.
+
+The Docker image also includes a `HEALTHCHECK`: teslabuddy refreshes `/tmp/teslabuddy.healthy` (override with `HEALTH_FILE`) only while it is connected to MQTT, so a broken connection marks the container unhealthy. Combined with `restart: always`, this can be used with a supervisor such as [autoheal](https://github.com/willfarrell/docker-autoheal) to restart the container automatically.
 
 ### Docker Secrets
 

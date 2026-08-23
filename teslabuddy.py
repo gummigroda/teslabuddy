@@ -39,6 +39,10 @@ TOKEN_CACHE_TIME = 30
 # Pub cache time in seconds
 PUBLISH_CACHE_TIME = 3600
 
+# How often the health file is touched, and the maximum age Docker should accept
+HEALTH_FILE = os.environ.get("HEALTH_FILE", "/tmp/teslabuddy.healthy")
+HEALTH_TOUCH_INTERVAL = 15
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s: %(levelname)s:%(name)s: %(message)s"
 )
@@ -118,6 +122,11 @@ class TeslaBuddy:
         self.error_sleep_time = COMMAND_RETRY_DELAY
         self.teslamatesettings = None
 
+        self._starttime = time.time()
+        self._mqttconnected = False
+        self._stats = {"teslamate_msgs": 0, "published": 0, "commands": 0}
+        self._lastteslamatemsg = 0.0
+
         if self.config.wake_topics:
             self.wake_topics = set(self.config.wake_topics.split())
         else:
@@ -133,6 +142,13 @@ class TeslaBuddy:
         If VIN is not set, defaults to 1
         If not found, an error is raised.
         """
+        log.info(
+            "Connecting to TeslaMate database %s@%s:%s/%s",
+            self.config.database_user,
+            self.config.database_host,
+            self.config.database_port,
+            self.config.database_name,
+        )
         if self.config.vin is None:
             whereclause = "settings_id = 1"
             whereargs = []
@@ -163,6 +179,22 @@ class TeslaBuddy:
             self.basetopic = self.basetopic[:-1]
         self.basetopic += "/" + self.vin
 
+        self.statustopic = self.config.status_topic
+        while self.statustopic.endswith("/"):
+            self.statustopic = self.statustopic[:-1]
+        self.statustopic += "/" + self.vin
+        self.availabilitytopic = f"{self.statustopic}/availability"
+
+        log.info(
+            "TeslaMate database OK: car id %s, name %r, %s, VIN %s",
+            self.tmid,
+            self.carname,
+            self.carmodeltxt,
+            self.vin,
+        )
+        log.info("Publishing to base topic: %s", self.basetopic)
+        log.info("Publishing status to: %s/status", self.statustopic)
+
     def getdbconn(self) -> postgres.Postgres:
         "Return a connection to the TeslaMate DB"
         dburl = (
@@ -175,10 +207,12 @@ class TeslaBuddy:
 
     def start(self):
         self.client = paho.mqtt.client.Client(
-            callback_api_version=paho.mqtt.client.CallbackAPIVersion.VERSION1
+            callback_api_version=paho.mqtt.client.CallbackAPIVersion.VERSION2
         )
         self.client.on_connect = self.onmqttconnect
+        self.client.on_disconnect = self.onmqttdisconnect
         self.client.on_message = self.onmqttmessage
+        self.client.will_set(self.availabilitytopic, "offline", retain=True)
 
         if self.config.mqtt_user:
             self.client.username_pw_set(self.config.mqtt_user, self.config.mqtt_pass)
@@ -204,6 +238,13 @@ class TeslaBuddy:
         if port is None:
             port = 8883 if use_tls else 1883
 
+        log.info(
+            "Connecting to MQTT broker %s:%s (TLS %s, auth %s)",
+            self.config.mqtt_host,
+            port,
+            "enabled" if use_tls else "disabled",
+            "enabled" if self.config.mqtt_user else "disabled",
+        )
         self.client.connect(self.config.mqtt_host, port)
         self.client.loop_start()
 
@@ -211,8 +252,16 @@ class TeslaBuddy:
         threading.Thread(target=self.gpsbundlethread, daemon=True).start()
         # Thread to manage waking TeslaMate when incoming commands happen
         threading.Thread(target=self.waketeslamatethread, daemon=True).start()
+        # Thread to log periodic status and update the Docker health file
+        threading.Thread(target=self.statusthread, daemon=True).start()
 
         self.homeassistantsetup()
+        log.info("Home Assistant discovery configuration published")
+        self.publishstatus()
+        log.info(
+            "Startup complete, status updates every %s seconds",
+            self.config.status_interval,
+        )
         # Run the tesla thread, resume on error
         while 1:
             try:
@@ -224,11 +273,30 @@ class TeslaBuddy:
                 time.sleep(self.error_sleep_time)
                 self.error_sleep_time *= 1.5
 
-    def onmqttconnect(self, client, userdata, flags, rc):
+    def onmqttconnect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code != 0:
+            self._mqttconnected = False
+            log.error("MQTT connection failed: %s", reason_code)
+            return
+        self._mqttconnected = True
+        log.info("Connected to MQTT broker")
+        self.client.publish(self.availabilitytopic, "online", retain=True)
         self.client.subscribe(f"{self.basetopic}/+/set")
         self.client.subscribe(f"teslamate/cars/{self.tmid}/+")
         for topic in self.wake_topics:
             self.client.subscribe(topic)
+        log.info(
+            "Subscribed to %s/+/set, teslamate/cars/%s/+ and %d wake topic(s)",
+            self.basetopic,
+            self.tmid,
+            len(self.wake_topics),
+        )
+
+    def onmqttdisconnect(
+        self, client, userdata, disconnect_flags, reason_code, properties=None
+    ):
+        self._mqttconnected = False
+        log.warning("Disconnected from MQTT broker (%s), will retry", reason_code)
 
     def onmqttmessage(self, client, userdata, msg):
         payload = msg.payload.decode()
@@ -246,10 +314,75 @@ class TeslaBuddy:
 
     def mqtt_publish(self, topic, payload, retain=False):
         log.debug("Publishing MQTT Message: %s : %s", topic, payload)
+        self._stats["published"] += 1
         self.client.publish(topic, payload, retain=retain)
+
+    def statusthread(self):
+        """Periodically log a status summary, publish it to MQTT and touch the
+        Docker health file
+
+        The health file is only refreshed while MQTT is connected, so a broken
+        connection eventually marks the container unhealthy.
+        """
+        lastlog = time.time()
+        while 1:
+            if self._mqttconnected:
+                try:
+                    with open(HEALTH_FILE, "w") as f:
+                        f.write(str(int(time.time())))
+                except OSError as e:
+                    log.debug("Could not write health file %s: %s", HEALTH_FILE, e)
+
+            interval = self.config.status_interval
+            if interval > 0 and time.time() - lastlog >= interval:
+                lastlog = time.time()
+                self.publishstatus()
+            time.sleep(HEALTH_TOUCH_INTERVAL)
+
+    def publishstatus(self):
+        "Log and publish the current status/statistics"
+        uptime = time.time() - self._starttime
+        if self._lastteslamatemsg:
+            lastmsgage = round(time.time() - self._lastteslamatemsg)
+            lastmsg = f"{lastmsgage}s ago"
+        else:
+            lastmsgage = None
+            lastmsg = "never"
+        log.info(
+            "Status: uptime %s, MQTT %s, TeslaMate messages %d "
+            "(last %s), published %d, Tesla API commands %d",
+            formatduration(uptime),
+            "connected" if self._mqttconnected else "DISCONNECTED",
+            self._stats["teslamate_msgs"],
+            lastmsg,
+            self._stats["published"],
+            self._stats["commands"],
+        )
+        self.mqtt_publish(
+            f"{self.statustopic}/status",
+            json.dumps(
+                {
+                    "state": "online",
+                    "vin": self.vin,
+                    "car_name": self.carname,
+                    "teslamate_car_id": self.tmid,
+                    "started": int(self._starttime),
+                    "uptime_seconds": round(uptime),
+                    "uptime": formatduration(uptime),
+                    "teslamate_messages": self._stats["teslamate_msgs"],
+                    "last_teslamate_message_seconds": lastmsgage,
+                    "messages_published": self._stats["published"],
+                    "tesla_api_commands": self._stats["commands"],
+                    "timestamp": int(time.time()),
+                }
+            ),
+            retain=True,
+        )
 
     def teslamatemsg(self, topic, value):
         "Process as message from TeslaMate"
+        self._stats["teslamate_msgs"] += 1
+        self._lastteslamatemsg = time.time()
         if topic in GPS_TOPICS:
             self.gpsq.put((topic, value))
 
@@ -460,6 +593,21 @@ class TeslaBuddy:
         )
 
         parser.add_argument(
+            "--status-topic",
+            help="base MQTT topic for teslabuddy status/statistics messages, "
+            "no trailing / (default teslabuddy)",
+            default="teslabuddy",
+        )
+
+        parser.add_argument(
+            "--status-interval",
+            help="seconds between periodic status log lines, 0 to disable "
+            "(default 300)",
+            default=300,
+            type=int,
+        )
+
+        parser.add_argument(
             "--debug",
             help='if set to "true", will include debug level logging',
         )
@@ -567,6 +715,8 @@ class TeslaBuddy:
 
                 # If we got here, no errors were raised, remove it from the state
                 del targetstate[key]
+                self._stats["commands"] += 1
+                log.info("Tesla API command applied: %s = %s", key, value)
                 errortimeout = COMMAND_RETRY_DELAY
                 errortries = 0
                 self.waketeslamate()
@@ -636,6 +786,13 @@ class TeslaBuddy:
         device_ref = {
             "identifiers": [f"{self.vin}_device"],
             "name": f"{self.carname} Vehicle",
+        }
+
+        # Added to every entity so HA marks them unavailable if teslabuddy stops
+        availability = {
+            "availability_topic": self.availabilitytopic,
+            "payload_available": "online",
+            "payload_not_available": "offline",
         }
 
         # Entities. Names omit the car name — HA automatically prepends the device name.
@@ -753,6 +910,7 @@ class TeslaBuddy:
                     "state_class": "measurement",
                     "device": device_full,
                     "origin": ORIGIN,
+                    **availability,
                 }
             ),
             retain=True,
@@ -767,6 +925,7 @@ class TeslaBuddy:
                 "unique_id": f"{self.vin}_{topic}",
                 "device": device_ref,
                 "origin": ORIGIN,
+                **availability,
             }
             if entry.get("uom"):
                 data["unit_of_measurement"] = entry["uom"]
@@ -799,6 +958,7 @@ class TeslaBuddy:
                     "device": device_ref,
                     "icon": "mdi:battery-alert",
                     "origin": ORIGIN,
+                    **availability,
                 }
             ),
             retain=True,
@@ -816,6 +976,7 @@ class TeslaBuddy:
                     "device": device_ref,
                     "icon": "mdi:battery-charging",
                     "origin": ORIGIN,
+                    **availability,
                 }
             ),
             retain=True,
@@ -835,6 +996,27 @@ class TeslaBuddy:
                     "source_type": "gps",
                     "icon": "mdi:crosshairs-gps",
                     "origin": ORIGIN,
+                    **availability,
+                }
+            ),
+            retain=True,
+        )
+
+        # teslabuddy's own status, exposed as a diagnostic entity
+        self.mqtt_publish(
+            f"homeassistant/sensor/{self.vin}/teslabuddy_status/config",
+            json.dumps(
+                {
+                    "name": "TeslaBuddy Uptime",
+                    "state_topic": f"{self.statustopic}/status",
+                    "json_attributes_topic": f"{self.statustopic}/status",
+                    "value_template": "{{value_json.uptime}}",
+                    "unique_id": f"{self.vin}_teslabuddy_status",
+                    "device": device_ref,
+                    "entity_category": "diagnostic",
+                    "icon": "mdi:heart-pulse",
+                    "origin": ORIGIN,
+                    **availability,
                 }
             ),
             retain=True,
@@ -852,7 +1034,20 @@ def forceint(v):
     return int(forcefloat(v))
 
 
+def formatduration(seconds: float) -> str:
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m {secs}s"
+
+
 def main():
+    log.info("Starting teslabuddy")
     t = TeslaBuddy()
     t.start()
 
