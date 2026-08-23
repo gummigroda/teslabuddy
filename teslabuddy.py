@@ -56,7 +56,6 @@ ORIGIN = {
     "support_url": "https://github.com/gummigroda/teslabuddy",
 }
 
-GPS_TOPICS = {"elevation", "location", "longitude", "geofence", "latitude", "speed", "heading"}
 MAP_THROUGH_TOPICS = {
     "battery_level",
     "charge_current_request",
@@ -106,7 +105,6 @@ BOOLEAN_TOPICS = {
 class TeslaBuddy:
     def __init__(self) -> None:
         self.config = self._initconfig()
-        self.gpsq = queue.Queue()
         self.teslapiq = queue.Queue()
         self.teslamateq = queue.Queue()
         # Store target command state in a dict so several commands will replace each
@@ -252,8 +250,6 @@ class TeslaBuddy:
         self.client.connect(self.config.mqtt_host, port)
         self.client.loop_start()
 
-        # Thread to manage bundling GPS information into a single message
-        threading.Thread(target=self.gpsbundlethread, daemon=True).start()
         # Thread to manage waking TeslaMate when incoming commands happen
         threading.Thread(target=self.waketeslamatethread, daemon=True).start()
         # Thread to log periodic status and update the Docker health file
@@ -398,10 +394,8 @@ class TeslaBuddy:
         "Process as message from TeslaMate"
         self._stats["teslamate_msgs"] += 1
         self._lastteslamatemsg = time.time()
-        if topic in GPS_TOPICS:
-            self.gpsq.put((topic, value))
 
-        elif topic in MAP_THROUGH_TOPICS:
+        if topic in MAP_THROUGH_TOPICS:
             self.pubifchanged(topic, value)
 
         elif topic in BOOLEAN_TOPICS:
@@ -423,59 +417,6 @@ class TeslaBuddy:
             else:
                 txt = "OFF"
             self.pubifchanged("charging", txt)
-
-    def gpsbundlethread(self):
-        "Waits for a full 'batch' of GPS location values before sending to HASS"
-        # Time to wait for any more messages to come in to populate the current_state
-        # TeslaMate sends all updates (on different topics) at the same moment
-        QUEUE_TIMEOUT = 0.1
-        current_state = {
-            "latitude": None,
-            "heading": 0,
-            "longitude": None,
-            "geofence": "",
-            "speed": 0,
-            "elevation": 0,
-            "state": "not_home",  # Used by HASS, matches "Home" TeslaMate geofence
-            "gps_accuracy": 1,  # HASS requires this, always set to 1
-        }
-
-        timeout = None
-        while 1:
-            try:
-                topic, value = self.gpsq.get(block=True, timeout=timeout)
-            except queue.Empty:
-                # New data has come in, with no updates, broadcast to HASS
-                timeout = None
-                if (
-                    current_state["latitude"] is None
-                    or current_state["longitude"] is None
-                ):
-                    # Don't try to send anyting if the lat/long is not set
-                    continue
-                self.pubifchanged("gps", json.dumps(current_state))
-                continue
-
-            if topic == "location":
-                # TeslaMate combines lat/lon in a single JSON topic (deprecated separate topics removed)
-                try:
-                    loc = json.loads(value)
-                    current_state["latitude"] = forcefloat(loc.get("latitude"))
-                    current_state["longitude"] = forcefloat(loc.get("longitude"))
-                except (json.JSONDecodeError, TypeError, KeyError):
-                    log.warning("Failed to parse location JSON: %r", value)
-
-            elif topic == "geofence":
-                current_state["geofence"] = value
-                if value.lower() == "home":
-                    current_state["state"] = "home"
-                else:
-                    current_state["state"] = "not_home"
-
-            elif topic in ("elevation", "longitude", "latitude", "speed", "heading"):
-                current_state[topic] = forcefloat(value)
-
-            timeout = QUEUE_TIMEOUT
 
     def waketeslamate(self):
         "Wake TeslaMate right away to get latest information"
@@ -1007,15 +948,20 @@ class TeslaBuddy:
             retain=True,
         )
 
-        # Device tracker — GPS location
+        # Device tracker — GPS location. Home Assistant expects the state to come
+        # from the geofence/home topic and the coordinates from the location JSON.
+        # TeslaMate publishes both of these directly, so discovery should point to
+        # the live TeslaMate topics instead of a teslabuddy-only derived payload.
         self.mqtt_publish(
             f"homeassistant/device_tracker/{self.vin}/gps/config",
             json.dumps(
                 {
                     "name": "Location",
-                    "json_attributes_topic": f"{self.basetopic}/gps",
-                    "state_topic": f"{self.basetopic}/gps",
-                    "value_template": "{{value_json.state}}",
+                    "state_topic": f"{teslamatetopic}/geofence",
+                    "json_attributes_topic": f"{teslamatetopic}/location",
+                    "value_template": "{{ value | lower }}",
+                    "payload_home": "home",
+                    "payload_not_home": "not_home",
                     "unique_id": f"{self.vin}_gps",
                     "device": device_ref,
                     "source_type": "gps",
