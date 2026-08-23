@@ -47,6 +47,8 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s: %(levelname)s:%(name)s: %(message)s"
 )
 log = logging.getLogger(__name__)
+logging.getLogger("paho.mqtt.client").setLevel(logging.INFO)
+logging.getLogger("paho.mqtt").setLevel(logging.INFO)
 
 # Included in every HA discovery message to identify this integration
 ORIGIN = {
@@ -206,8 +208,10 @@ class TeslaBuddy:
         return conn
 
     def start(self):
+        client_id = self.config.mqtt_client_id or "teslabuddy"
         self.client = paho.mqtt.client.Client(
-            callback_api_version=paho.mqtt.client.CallbackAPIVersion.VERSION2
+            client_id=client_id,
+            callback_api_version=paho.mqtt.client.CallbackAPIVersion.VERSION2,
         )
         self.client.on_connect = self.onmqttconnect
         self.client.on_disconnect = self.onmqttdisconnect
@@ -276,7 +280,15 @@ class TeslaBuddy:
     def onmqttconnect(self, client, userdata, flags, reason_code, properties=None):
         if reason_code != 0:
             self._mqttconnected = False
-            log.error("MQTT connection failed: %s", reason_code)
+            reason_name = getattr(reason_code, "name", str(reason_code))
+            reason_value = getattr(reason_code, "value", reason_code)
+            error_text = client.error_string(reason_value)
+            log.error(
+                "MQTT connection failed: %s (%s) - %s",
+                reason_name,
+                reason_value,
+                error_text,
+            )
             return
         self._mqttconnected = True
         log.info("Connected to MQTT broker")
@@ -546,6 +558,11 @@ class TeslaBuddy:
             help="MQTT broker password",
         )
         parser.add_argument(
+            "--mqtt-client-id",
+            help="MQTT client id to use for the broker connection (default: teslabuddy)",
+            default="teslabuddy",
+        )
+        parser.add_argument(
             "--mqtt-tls",
             help='if set to "true", enable TLS for the MQTT connection (mqtts)',
         )
@@ -646,8 +663,12 @@ class TeslaBuddy:
             if args.debug.lower() == "true":
                 args.debug = True
             logging.getLogger().setLevel(logging.DEBUG)
+            logging.getLogger("paho.mqtt.client").setLevel(logging.DEBUG)
+            logging.getLogger("paho.mqtt").setLevel(logging.DEBUG)
         if args.debug is not True:
             args.debug = False
+            logging.getLogger("paho.mqtt.client").setLevel(logging.INFO)
+            logging.getLogger("paho.mqtt").setLevel(logging.INFO)
         # log.debug("Processed command line arguments: %s", cmdlineargs)
         log.debug("Final arguments: %s", args)
         return args
