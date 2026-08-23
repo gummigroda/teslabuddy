@@ -818,11 +818,11 @@ class TeslaBuddy:
                 data["entity_category"] = entry["entity_category"]
 
             if hasstype == "binary_sensor":
-                data["payload_on"] = "true"
-                data["payload_off"] = "false"
+                data["payload_on"] = True
+                data["payload_off"] = False
             elif hasstype == "switch":
-                data["payload_on"] = "true"
-                data["payload_off"] = "false"
+                data["payload_on"] = True
+                data["payload_off"] = False
 
             self.mqtt_publish(
                 f"homeassistant/{hasstype}/{self.vin}/{topic}/config",
@@ -858,8 +858,8 @@ class TeslaBuddy:
                     "name": "Charging",
                     "state_topic": f"{teslamatetopic}/charging",
                     "command_topic": f"{self.basetopic}/charging/set",
-                    "payload_on": "true",
-                    "payload_off": "false",
+                    "payload_on": True,
+                    "payload_off": False,
                     "unique_id": f"{self.vin}_charging",
                     "device": device_ref,
                     "icon": "mdi:battery-charging",
@@ -875,7 +875,7 @@ class TeslaBuddy:
         # TeslaMate publishes both of these directly, so discovery should point to
         # the live TeslaMate topics instead of a teslabuddy-only derived payload.
         self.mqtt_publish(
-            f"homeassistant/device_tracker/{self.vin}/gps/config",
+            f"homeassistant/device_tracker/{self.vin}/config",
             json.dumps(
                 {
                     "name": "Location",
