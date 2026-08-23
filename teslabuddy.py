@@ -36,9 +36,6 @@ COMMAND_RETRY_DELAY = 10
 # Number of seconds to cache the token from the TeslaMate DB
 TOKEN_CACHE_TIME = 30
 
-# Pub cache time in seconds
-PUBLISH_CACHE_TIME = 3600
-
 # How often the health file is touched, and the maximum age Docker should accept
 HEALTH_FILE = os.environ.get("HEALTH_FILE", "/tmp/teslabuddy.healthy")
 HEALTH_TOUCH_INTERVAL = 15
@@ -56,63 +53,11 @@ ORIGIN = {
     "support_url": "https://github.com/gummigroda/teslabuddy",
 }
 
-MAP_THROUGH_TOPICS = {
-    "battery_level",
-    "charge_current_request",
-    "charge_current_request_max",
-    "charge_energy_added",
-    "charge_limit_soc",
-    "charger_actual_current",
-    "charger_phases",
-    "charger_power",
-    "charger_voltage",
-    "charging_state",
-    "climate_keeper_mode",
-    "est_battery_range_km",
-    "ideal_battery_range_km",
-    "inside_temp",
-    "odometer",
-    "outside_temp",
-    "rated_battery_range_km",
-    "scheduled_charging_start_time",
-    "state",
-    "time_to_full_charge",
-    "tpms_pressure_fl",
-    "tpms_pressure_fr",
-    "tpms_pressure_rl",
-    "tpms_pressure_rr",
-    "usable_battery_level",
-    "version",
-}
-# Topics that TeslaMate publishes as "true"/"false" strings mapped to ON/OFF for HA
-BOOLEAN_TOPICS = {
-    "charge_port_door_open",
-    "doors_open",
-    "is_climate_on",
-    "is_preconditioning",
-    "locked",
-    "plugged_in",
-    "sentry_mode",
-    "tpms_soft_warning_fl",
-    "tpms_soft_warning_fr",
-    "tpms_soft_warning_rl",
-    "tpms_soft_warning_rr",
-    "update_available",
-    "windows_open",
-}
-
-
 class TeslaBuddy:
     def __init__(self) -> None:
         self.config = self._initconfig()
         self.teslapiq = queue.Queue()
         self.teslamateq = queue.Queue()
-        # Store target command state in a dict so several commands will replace each
-        # other rather than an internal queue where all updates would eventually hit
-        # the Tesla API, potentially resulting in ratelimits getting hit sooner.
-        self._pubstate = {}
-        self._pubcacheexpiry = time.time() + PUBLISH_CACHE_TIME
-
         self._tokencache = {}
 
         self.tmid: int = -1
@@ -391,32 +336,16 @@ class TeslaBuddy:
         )
 
     def teslamatemsg(self, topic, value):
-        "Process as message from TeslaMate"
+        """Process a message from TeslaMate.
+
+        TeslaMate remains the authoritative source for vehicle state.
+        teslabuddy retains only its own command and status topics.
+        """
         self._stats["teslamate_msgs"] += 1
         self._lastteslamatemsg = time.time()
 
-        if topic in MAP_THROUGH_TOPICS:
-            self.pubifchanged(topic, value)
-
-        elif topic in BOOLEAN_TOPICS:
-            normalized = str(value).strip().lower()
-            self.pubifchanged(topic, "ON" if normalized == "true" else "OFF")
-
-        elif topic == "shift_state":
-            if not value:
-                value = "P"
-            self.pubifchanged(topic, value)
-
-        # else:
-        # print("TBC:", topic, value)
-
-        if topic == "state":
-            # Also update the charging/not charging switch
-            if value == "charging":
-                txt = "ON"
-            else:
-                txt = "OFF"
-            self.pubifchanged("charging", txt)
+        # Intentionally no state mirroring under the teslabuddy namespace.
+        # Home Assistant discovery points directly to TeslaMate's live topics.
 
     def waketeslamate(self):
         "Wake TeslaMate right away to get latest information"
@@ -717,22 +646,6 @@ class TeslaBuddy:
 
         raise requests.RequestException(f"Tesla API Error: {response['reason']}")
 
-    def pubifchanged(self, item: str, value: str):
-        """Publish to MQTT item (self.basetopic will be applied), with value.
-
-        An item is only published if it has changed from when previously published.
-
-        Cache is cleared about every hour.
-        """
-        if time.time() > self._pubcacheexpiry:
-            log.debug("Clearing publish cache")
-            self._pubstate.clear()
-            self._pubcacheexpiry = time.time() + PUBLISH_CACHE_TIME
-
-        if self._pubstate.get(item) != value:
-            self.mqtt_publish(f"{self.basetopic}/{item}", value)
-            self._pubstate[item] = value
-
     def homeassistantsetup(self):
         "Publish config for Home Assistant MQTT auto-discovery"
         temp_unit = "°" + self.teslamatesettings.unit_of_temperature
@@ -904,6 +817,13 @@ class TeslaBuddy:
             if entry.get("entity_category"):
                 data["entity_category"] = entry["entity_category"]
 
+            if hasstype == "binary_sensor":
+                data["payload_on"] = "true"
+                data["payload_off"] = "false"
+            elif hasstype == "switch":
+                data["payload_on"] = "true"
+                data["payload_off"] = "false"
+
             self.mqtt_publish(
                 f"homeassistant/{hasstype}/{self.vin}/{topic}/config",
                 json.dumps(data),
@@ -938,6 +858,8 @@ class TeslaBuddy:
                     "name": "Charging",
                     "state_topic": f"{teslamatetopic}/charging",
                     "command_topic": f"{self.basetopic}/charging/set",
+                    "payload_on": "true",
+                    "payload_off": "false",
                     "unique_id": f"{self.vin}_charging",
                     "device": device_ref,
                     "icon": "mdi:battery-charging",
