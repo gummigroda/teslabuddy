@@ -22,6 +22,7 @@ import time
 import json
 import logging
 import threading
+import urllib.parse
 import postgres
 
 import paho.mqtt.client
@@ -164,7 +165,11 @@ class TeslaBuddy:
 
     def getdbconn(self) -> postgres.Postgres:
         "Return a connection to the TeslaMate DB"
-        dburl = f"postgres://{self.config.database_user}:{self.config.database_pass}@{self.config.database_host}:{self.config.database_port}/{self.config.database_name}"
+        dburl = (
+            f"postgres://{urllib.parse.quote(self.config.database_user, safe='')}:"
+            f"{urllib.parse.quote(self.config.database_pass, safe='')}@"
+            f"{self.config.database_host}:{self.config.database_port}/{self.config.database_name}"
+        )
         conn = postgres.Postgres(dburl)
         return conn
 
