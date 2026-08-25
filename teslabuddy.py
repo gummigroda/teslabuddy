@@ -696,6 +696,9 @@ class TeslaBuddy:
              "entity_category": "diagnostic", "icon": "mdi:monitor"},
             {"topic": "display_name", "type": "sensor", "name": "Display Name",
              "entity_category": "diagnostic", "icon": "mdi:label"},
+            {"topic": "active_route", "type": "sensor", "name": "Active Route",
+             "icon": "mdi:routes", "json_attributes": True,
+             "value_template": "{{ value_json.destination if value_json.get('destination') else value_json.get('error', 'No route') }}"},
             {"topic": "scheduled_charging_start_time", "type": "sensor",
              "name": "Scheduled Charge Time", "icon": "mdi:clock-outline"},
             # --- Driving Data ---
@@ -877,6 +880,10 @@ class TeslaBuddy:
                 data["state_class"] = entry["state_class"]
             if entry.get("entity_category"):
                 data["entity_category"] = entry["entity_category"]
+            if entry.get("value_template"):
+                data["value_template"] = entry["value_template"]
+            if entry.get("json_attributes"):
+                data["json_attributes_topic"] = f"{teslamatetopic}/{topic}"
 
             if hasstype == "binary_sensor":
                 data["payload_on"] = True
