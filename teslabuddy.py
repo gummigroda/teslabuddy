@@ -71,6 +71,7 @@ class TeslaBuddy:
         self._mqttconnected = False
         self._stats = {"teslamate_msgs": 0, "published": 0, "commands": 0}
         self._lastteslamatemsg = 0.0
+        self._mqtt_values = {}  # Store MQTT topic values for conditional logic
 
         if self.config.wake_topics:
             self.wake_topics = set(self.config.wake_topics.split())
@@ -263,6 +264,10 @@ class TeslaBuddy:
         if topic in self.wake_topics:
             self.waketeslamate()
         elif topic.startswith("teslamate/cars/"):
+            # Store MQTT values for conditional entity setup
+            if len(parts) >= 4:
+                topic_key = parts[3]  # e.g., "sun_roof_installed"
+                self._mqtt_values[topic_key] = payload
             self.teslamatemsg(parts[3], payload)
         elif topic.startswith(self.basetopic):
             if parts[-1] == "set":
@@ -862,6 +867,14 @@ class TeslaBuddy:
         for entry in ENTITIES:
             topic = entry["topic"]
             hasstype = entry["type"]
+            
+            # Skip sunroof entities if sunroof is not installed
+            sunroof_topics = {"sun_roof_installed", "sun_roof_state", "sun_roof_percent_open"}
+            if topic in sunroof_topics:
+                sunroof_installed = self._mqtt_values.get("sun_roof_installed", "true")
+                if sunroof_installed != "true":
+                    continue
+            
             data = {
                 "name": entry["name"],
                 "state_topic": f"{teslamatetopic}/{topic}",
